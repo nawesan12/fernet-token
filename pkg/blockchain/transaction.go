@@ -2,7 +2,6 @@ package blockchain
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"time"
 )
@@ -15,7 +14,6 @@ type Transaction struct {
 	Timestamp int64   // Marca de tiempo
 }
 
-// NewTransaction crea una nueva transacción
 func NewTransaction(sender, receiver string, amount float64) *Transaction {
 	tx := &Transaction{
 		Sender:    sender,
@@ -27,11 +25,8 @@ func NewTransaction(sender, receiver string, amount float64) *Transaction {
 	return tx
 }
 
-// CalculateHash genera el hash de la transacción
 func (t *Transaction) CalculateHash() string {
-	// Convert Amount to string
-	amountStr := fmt.Sprintf("%f", t.Amount)
-	data := t.Sender + t.Receiver + amountStr + string(t.Timestamp)
+	data := fmt.Sprintf("%s%s%f%d", t.Sender, t.Receiver, t.Amount, t.Timestamp)
 	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%x", hash)
 }

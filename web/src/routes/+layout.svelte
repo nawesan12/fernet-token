@@ -1,10 +1,12 @@
 <script lang="ts">
-	import { i18n } from '$lib/i18n';
-	import { ParaglideJS } from '@inlang/paraglide-sveltekit';
 	import '../app.css';
 	let { children } = $props();
 </script>
 
-<ParaglideJS {i18n}>
+<svelte:head>
+	<title>Fernet Token</title>
+</svelte:head>
+
+<main class="mx-auto w-full p-4 lg:max-w-7xl lg:px-0">
 	{@render children()}
-</ParaglideJS>
+</main>

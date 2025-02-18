@@ -1,13 +1,17 @@
-// cmd/server/main.go
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"flag"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/nawesan12/fernet-token/pkg/blockchain"
 	"github.com/nawesan12/fernet-token/pkg/p2p"
@@ -15,61 +19,114 @@ import (
 )
 
 var (
-	bc           = blockchain.NewBlockchain()
-	server       = p2p.NewP2PServer()
+	bc           *blockchain.Blockchain
+	server       *p2p.P2PServer
 	balances     = make(map[string]float64)
 	totalSupply  = 1000000.0
 	miningReward = 10.0
+	mutex        sync.Mutex
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go [port]")
-	}
-	port := os.Args[1]
+	port := flag.String("port", "8080", "Port to run the server on")
+	flag.Parse()
 
-	// Distribute initial supply
-	genesisWallet := wallet.NewWallet()
-	balances[genesisWallet.PublicKey] = totalSupply
-	fmt.Println("Genesis wallet created with", totalSupply, "tokens")
+	initializeBlockchain()
+
+	// Handle OS signals for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handleShutdown(cancel)
 
 	// Start P2P server
-	go server.Start(port)
+	go server.Start(*port)
 
-	// Setup HTTP routes
-	http.HandleFunc("/wallet/create", createWalletHandler)
-	http.HandleFunc("/wallet/balance", getBalanceHandler)
-	http.HandleFunc("/transaction/send", sendTransactionHandler)
-	http.HandleFunc("/blockchain", getBlockchainHandler)
-	http.HandleFunc("/peer/connect", connectPeerHandler)
-	http.HandleFunc("/peer/list", listPeersHandler)
-	http.HandleFunc("/mine", mineBlockHandler)
-	http.HandleFunc("/transaction/add", handleAddTransaction)
-	http.HandleFunc("/transaction/pending", handleGetPendingTransactions)
+	// Start HTTP server
+	startHTTPServer(*port, ctx)
+}
 
-	server := &http.Server{Addr: ":" + port}
-	ln, err := net.Listen("tcp", server.Addr)
+func initializeBlockchain() {
+	bc = blockchain.NewBlockchain()
+	server = p2p.NewP2PServer()
+
+	genesisWallet, err := wallet.NewWallet()
 	if err != nil {
-		log.Fatal("Error al iniciar el servidor:", err)
+		log.Fatal("Failed to create genesis wallet", http.StatusInternalServerError)
 	}
-	log.Println("🚀 Server running on port", ln.Addr().(*net.TCPAddr).Port)
-	log.Fatal(server.Serve(ln))
+	balances[genesisWallet.PublicKey] = totalSupply
+	log.Println("✅ Genesis wallet created with", totalSupply, "tokens")
+}
+
+func handleShutdown(cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	<-sigChan
+	log.Println("🛑 Shutting down gracefully...")
+	cancel()
+	time.Sleep(1 * time.Second)
+	os.Exit(0)
+}
+
+func startHTTPServer(port string, ctx context.Context) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/wallet/create", createWalletHandler)
+	mux.HandleFunc("/wallet/balance", getBalanceHandler)
+	mux.HandleFunc("/transaction/send", sendTransactionHandler)
+	mux.HandleFunc("/blockchain", getBlockchainHandler)
+	mux.HandleFunc("/peer/connect", connectPeerHandler)
+	mux.HandleFunc("/peer/list", listPeersHandler)
+	mux.HandleFunc("/mine", mineBlockHandler)
+	mux.HandleFunc("/transaction/add", handleAddTransaction)
+	mux.HandleFunc("/transaction/pending", handleGetPendingTransactions)
+
+	server := &http.Server{Addr: ":" + port, Handler: mux}
+
+	go func() {
+		ln, err := net.Listen("tcp", server.Addr)
+		if err != nil {
+			log.Fatal("❌ Failed to start HTTP server:", err)
+		}
+		log.Println("🚀 HTTP Server running on port", ln.Addr().(*net.TCPAddr).Port)
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Fatal("❌ Server error:", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownServer(server)
+}
+
+func shutdownServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatal("❌ Error shutting down server:", err)
+	}
+	log.Println("✅ Server shut down gracefully")
 }
 
 func createWalletHandler(w http.ResponseWriter, r *http.Request) {
-	wallet := wallet.NewWallet()
-	if wallet == nil {
+	wallet, err := wallet.NewWallet()
+	if err != nil {
 		http.Error(w, "Failed to create wallet", http.StatusInternalServerError)
 		return
 	}
+
+	mutex.Lock()
 	balances[wallet.PublicKey] = 0
-	json.NewEncoder(w).Encode(wallet.PublicKey)
+	mutex.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]string{"publicKey": wallet.PublicKey})
 }
 
 func getBalanceHandler(w http.ResponseWriter, r *http.Request) {
-	// Placeholder for wallet balance retrieval
 	addr := r.URL.Query().Get("address")
+	mutex.Lock()
 	balance, exists := balances[addr]
+	mutex.Unlock()
+
 	if !exists {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
@@ -83,14 +140,20 @@ func sendTransactionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	mutex.Lock()
+	defer mutex.Unlock()
+
 	if balances[tx.Sender] < tx.Amount {
 		http.Error(w, "Insufficient balance", http.StatusForbidden)
 		return
 	}
+
 	balances[tx.Sender] -= tx.Amount
 	balances[tx.Receiver] += tx.Amount
 	bc.AddTransaction(tx.Sender, tx.Receiver, tx.Amount)
-	json.NewEncoder(w).Encode("Transaction processed successfully")
+
+	json.NewEncoder(w).Encode(map[string]string{"message": "Transaction processed successfully"})
 }
 
 func getBlockchainHandler(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +161,7 @@ func getBlockchainHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func connectPeerHandler(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode("Peer connection not implemented yet")
+	http.Error(w, "Peer connection not implemented yet", http.StatusNotImplemented)
 }
 
 func listPeersHandler(w http.ResponseWriter, r *http.Request) {
@@ -112,15 +175,12 @@ func mineBlockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mutex.Lock()
 	bc.MineBlock(minerAddress, miningReward)
 	balances[minerAddress] += miningReward
-	json.NewEncoder(w).Encode("Block mined and reward issued to miner")
-}
+	mutex.Unlock()
 
-type TransactionRequest struct {
-	Sender   string  `json:"sender"`
-	Receiver string  `json:"receiver"`
-	Amount   float64 `json:"amount"`
+	json.NewEncoder(w).Encode(map[string]string{"message": "Block mined and reward issued to miner"})
 }
 
 func handleAddTransaction(w http.ResponseWriter, r *http.Request) {
@@ -130,11 +190,20 @@ func handleAddTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mutex.Lock()
 	bc.AddTransaction(req.Sender, req.Receiver, req.Amount)
+	mutex.Unlock()
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Transaction added"})
 }
 
 func handleGetPendingTransactions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(bc.GetPendingTransactions())
+}
+
+type TransactionRequest struct {
+	Sender   string  `json:"sender"`
+	Receiver string  `json:"receiver"`
+	Amount   float64 `json:"amount"`
 }

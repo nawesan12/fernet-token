@@ -5,19 +5,21 @@ import (
 	"net"
 )
 
-type P2PClient struct{}
-
-func NewP2PClient() *P2PClient {
-	return &P2PClient{}
+type P2PClient struct {
+	ServerAddress string
 }
 
-func (c *P2PClient) ConnectToPeer(address string) {
-	conn, err := net.Dial("tcp", address)
+func NewP2PClient(serverAddr string) *P2PClient {
+	return &P2PClient{ServerAddress: serverAddr}
+}
+
+func (c *P2PClient) ConnectToPeer() {
+	conn, err := net.Dial("tcp", c.ServerAddress)
 	if err != nil {
-		fmt.Println("Failed to connect to peer:", err)
+		fmt.Println("❌ Failed to connect to peer:", err)
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to peer:", address)
+	fmt.Println("✅ Connected to peer:", c.ServerAddress)
 }

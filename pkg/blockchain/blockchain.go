@@ -20,11 +20,13 @@ type Block struct {
 type Blockchain struct {
 	Chain       []Block
 	PendingTxns []Transaction
+	Balances    map[string]float64 // Track balances per address
 }
 
-// NewBlockchain crea una nueva instancia de Blockchain
 func NewBlockchain() *Blockchain {
-	bc := &Blockchain{}
+	bc := &Blockchain{
+		Balances: make(map[string]float64),
+	}
 	bc.CreateGenesisBlock()
 	return bc
 }
@@ -40,12 +42,24 @@ func (bc *Blockchain) CreateGenesisBlock() {
 		Miner:        "",
 	}
 	bc.Chain = append(bc.Chain, genesisBlock)
+	bc.Balances["network"] = 1000000
 }
 
-func (bc *Blockchain) AddTransaction(sender, receiver string, amount float64) {
-	tx := Transaction{Sender: sender, Receiver: receiver, Amount: amount}
-	bc.PendingTxns = append(bc.PendingTxns, tx)
-	fmt.Println("Transaction added:", tx)
+func (bc *Blockchain) AddTransaction(sender, receiver string, amount float64) bool {
+	if sender == receiver || amount <= 0 {
+		fmt.Println("❌ Invalid transaction: sender and receiver must be different, and amount must be positive.")
+		return false
+	}
+
+	if bc.Balances[sender] < amount {
+		fmt.Println("❌ Transaction failed: insufficient balance")
+		return false
+	}
+
+	tx := NewTransaction(sender, receiver, amount)
+	bc.PendingTxns = append(bc.PendingTxns, *tx)
+	fmt.Println("📩 Transaction added:", tx)
+	return true
 }
 
 func (bc *Blockchain) GetPendingTransactions() []Transaction {
@@ -54,7 +68,7 @@ func (bc *Blockchain) GetPendingTransactions() []Transaction {
 
 func (bc *Blockchain) MineBlock(miner string, reward float64) {
 	if len(bc.PendingTxns) == 0 {
-		fmt.Println("No transactions to mine")
+		fmt.Println("⛏ No transactions to mine.")
 		return
 	}
 
@@ -72,9 +86,14 @@ func (bc *Blockchain) MineBlock(miner string, reward float64) {
 	bc.Chain = append(bc.Chain, newBlock)
 	bc.PendingTxns = nil
 
-	bc.AddTransaction("network", miner, reward)
+	for _, tx := range newBlock.Transactions {
+		bc.Balances[tx.Sender] -= tx.Amount
+		bc.Balances[tx.Receiver] += tx.Amount
+	}
 
-	fmt.Println("Block mined by: ", miner, "with hash:", newBlock.Hash)
+	bc.Balances[miner] += reward
+
+	fmt.Println("✅ Block mined by", miner, "with hash:", newBlock.Hash)
 }
 
 func (bc *Blockchain) ProofOfWork(block *Block) string {
@@ -92,4 +111,13 @@ func (bc *Blockchain) CalculateHash(block *Block) string {
 	blockData, _ := json.Marshal(block)
 	hash := sha256.Sum256(blockData)
 	return fmt.Sprintf("%x", hash)
+}
+
+func (bc *Blockchain) GetBalance(address string) float64 {
+	return bc.Balances[address]
+}
+
+// NewTransaction creates a new signed transaction
+type Consensus interface {
+	ValidateTransaction(tx *Transaction) bool
 }
