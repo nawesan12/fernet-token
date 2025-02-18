@@ -15,7 +15,7 @@ fi
 # 2. Configurar variables de entorno
 export NODE_PORT=8080
 export P2P_PORT=6000
-export DATA_DIR="$HOME/.olive-token"
+export DATA_DIR="$HOME/.fernet-token"
 mkdir -p $DATA_DIR
 
 echo "📂 Carpeta de datos creada en $DATA_DIR"
@@ -34,4 +34,4 @@ fi
 echo "🚀 Iniciando nodo en el puerto $NODE_PORT..."
 go run cmd/server/main.go
 
-echo "✅ Nodo ejecutándose correctamente. ¡Bienvenido a la red DAG!"
+echo "✅ Nodo ejecutándose correctamente. ¡Bienvenido a la red DAG de Fernet!"

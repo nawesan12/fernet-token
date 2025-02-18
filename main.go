@@ -49,7 +49,7 @@ func main() {
 	genesisBlock.Hash = calculateHash(genesisBlock)
 
 	// Crear un segundo bloque
-	newBlock := createBlock(genesisBlock, []string{"Pago de 100 MiCoin", "Pago de 50 MiCoin"})
+	newBlock := createBlock(genesisBlock, []string{"Pago de 100 Fernet", "Pago de 50 Fernet"})
 	fmt.Println("Bloque creado:", newBlock)
 
 	listener, _ := net.Listen("tcp", ":8080")
