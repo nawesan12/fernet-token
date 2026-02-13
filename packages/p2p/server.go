@@ -1,92 +1,211 @@
 package p2p
 
 import (
-	"encoding/json"
-	"fmt"
+	"log"
 	"net"
 	"sync"
+
+	"github.com/nawesan12/fernet-token/packages/blockchain"
 )
 
-type Peer struct {
-	Address string
-	Conn    net.Conn
+// MessageHandler is called when a message is received from a peer.
+type MessageHandler func(Message)
+
+type peer struct {
+	addr string
+	conn net.Conn
 }
 
 type P2PServer struct {
-	Peers map[string]*Peer
-	Mutex sync.Mutex
+	port     string
+	handler  MessageHandler
+	peers    map[string]*peer
+	mu       sync.RWMutex
+	listener net.Listener
+	quit     chan struct{}
 }
 
-func NewP2PServer() *P2PServer {
-	return &P2PServer{Peers: make(map[string]*Peer)}
+func NewP2PServer(port string, handler MessageHandler) *P2PServer {
+	return &P2PServer{
+		port:    port,
+		handler: handler,
+		peers:   make(map[string]*peer),
+		quit:    make(chan struct{}),
+	}
 }
 
-func (s *P2PServer) Start(port string) {
-	ln, err := net.Listen("tcp", ":"+port)
+// Start listens for incoming TCP connections.
+func (s *P2PServer) Start() {
+	ln, err := net.Listen("tcp", ":"+s.port)
 	if err != nil {
-		fmt.Println("❌ Error starting P2P server:", err)
+		log.Printf("P2P: failed to listen on port %s: %v", s.port, err)
 		return
 	}
-	defer ln.Close()
+	s.listener = ln
+	log.Printf("P2P: listening on port %s", s.port)
 
-	fmt.Println("🔗 P2P Server listening on port", port)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			fmt.Println("⚠️ Connection error:", err)
-			continue
+			select {
+			case <-s.quit:
+				return
+			default:
+				log.Printf("P2P: accept error: %v", err)
+				continue
+			}
 		}
-		go s.handleConnection(conn)
+		go s.handleConn(conn)
 	}
 }
 
-func (s *P2PServer) handleConnection(conn net.Conn) {
-	peerAddr := conn.RemoteAddr().String()
-	s.Mutex.Lock()
-	s.Peers[peerAddr] = &Peer{Address: peerAddr, Conn: conn}
-	s.Mutex.Unlock()
+func (s *P2PServer) handleConn(conn net.Conn) {
+	addr := conn.RemoteAddr().String()
+	s.mu.Lock()
+	s.peers[addr] = &peer{addr: addr, conn: conn}
+	s.mu.Unlock()
 
-	fmt.Println("✅ New peer connected:", peerAddr)
-	defer conn.Close()
+	log.Printf("P2P: peer connected: %s", addr)
 
-	// Listen for messages
+	defer func() {
+		conn.Close()
+		s.mu.Lock()
+		delete(s.peers, addr)
+		s.mu.Unlock()
+		log.Printf("P2P: peer disconnected: %s", addr)
+	}()
+
 	for {
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
+		msg, err := ReadMessage(conn)
 		if err != nil {
-			fmt.Println("🔌 Peer disconnected:", peerAddr)
-			s.Mutex.Lock()
-			delete(s.Peers, peerAddr)
-			s.Mutex.Unlock()
 			return
 		}
-		s.handleMessage(buffer[:n])
+
+		if msg.Type == MsgPing {
+			WriteMessage(conn, Message{Type: MsgPong})
+			continue
+		}
+
+		msg.SenderAddr = addr
+		s.handler(msg)
 	}
 }
 
-func (s *P2PServer) handleMessage(data []byte) {
-	var message map[string]interface{}
-	if err := json.Unmarshal(data, &message); err != nil {
-		fmt.Println("❌ Failed to parse message:", err)
-		return
-	}
-	fmt.Println("📩 Received message:", message)
-	// Handle different message types here (e.g., transactions, blocks, peer requests)
-}
-
-func (s *P2PServer) BroadcastMessage(msg map[string]interface{}) {
-	data, err := json.Marshal(msg)
+// ConnectToPeer establishes a persistent outbound connection to a peer.
+func (s *P2PServer) ConnectToPeer(address string) error {
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		fmt.Println("❌ Failed to serialize message:", err)
+		return err
+	}
+
+	s.mu.Lock()
+	s.peers[address] = &peer{addr: address, conn: conn}
+	s.mu.Unlock()
+
+	log.Printf("P2P: connected to peer: %s", address)
+
+	// Start listening for messages from this peer
+	go func() {
+		defer func() {
+			conn.Close()
+			s.mu.Lock()
+			delete(s.peers, address)
+			s.mu.Unlock()
+			log.Printf("P2P: outbound peer disconnected: %s", address)
+		}()
+
+		for {
+			msg, err := ReadMessage(conn)
+			if err != nil {
+				return
+			}
+
+			if msg.Type == MsgPing {
+				WriteMessage(conn, Message{Type: MsgPong})
+				continue
+			}
+
+			msg.SenderAddr = address
+			s.handler(msg)
+		}
+	}()
+
+	// Request blocks from the peer
+	WriteMessage(conn, Message{Type: MsgGetBlocks})
+
+	return nil
+}
+
+// BroadcastTransaction sends a transaction to all connected peers.
+func (s *P2PServer) BroadcastTransaction(tx *blockchain.Transaction) {
+	msg := Message{Type: MsgTransaction, Transaction: tx}
+	s.broadcast(msg)
+}
+
+// BroadcastBlock sends a block to all connected peers.
+func (s *P2PServer) BroadcastBlock(block *blockchain.Block) {
+	msg := Message{Type: MsgBlock, Block: block}
+	s.broadcast(msg)
+}
+
+// SendChain sends the full chain to a specific peer.
+func (s *P2PServer) SendChain(addr string, chain []blockchain.Block) {
+	s.mu.RLock()
+	p, ok := s.peers[addr]
+	s.mu.RUnlock()
+
+	if !ok {
+		log.Printf("P2P: peer %s not found for SendChain", addr)
 		return
 	}
 
-	s.Mutex.Lock()
-	defer s.Mutex.Unlock()
-	for _, peer := range s.Peers {
-		_, err := peer.Conn.Write(data)
-		if err != nil {
-			fmt.Println("⚠️ Failed to send message to", peer.Address, err)
+	msg := Message{Type: MsgChain, Chain: chain}
+	if err := WriteMessage(p.conn, msg); err != nil {
+		log.Printf("P2P: failed to send chain to %s: %v", addr, err)
+	}
+}
+
+func (s *P2PServer) broadcast(msg Message) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for addr, p := range s.peers {
+		if err := WriteMessage(p.conn, msg); err != nil {
+			log.Printf("P2P: failed to send to %s: %v", addr, err)
 		}
 	}
+}
+
+// PeerCount returns the number of connected peers.
+func (s *P2PServer) PeerCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.peers)
+}
+
+// PeerAddresses returns the addresses of all connected peers.
+func (s *P2PServer) PeerAddresses() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var addrs []string
+	for addr := range s.peers {
+		addrs = append(addrs, addr)
+	}
+	return addrs
+}
+
+// Stop shuts down the P2P server.
+func (s *P2PServer) Stop() {
+	close(s.quit)
+	if s.listener != nil {
+		s.listener.Close()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.peers {
+		p.conn.Close()
+	}
+	s.peers = make(map[string]*peer)
 }

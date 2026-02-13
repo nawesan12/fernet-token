@@ -1,1 +1,9 @@
 node_modules
+*.db
+.fernet-token*/
+.DS_Store
+apps/desktop/build/bin/
+apps/desktop/frontend/dist/
+apps/desktop/frontend/node_modules/
+apps/web/.svelte-kit/
+apps/web/build/
